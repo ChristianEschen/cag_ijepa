@@ -110,11 +110,11 @@ def main(args, resume_preempt=False):
     copy_data = args['meta']['copy_data']
     pred_depth = args['meta']['pred_depth']
     pred_emb_dim = args['meta']['pred_emb_dim']
-    if not torch.cuda.is_available():
-        device = torch.device('cpu')
-    else:
-        device = torch.device('cuda:0')
-        torch.cuda.set_device(device)
+    # if not torch.cuda.is_available():
+    #     device = torch.device('cpu')
+    # else:
+    #     device = torch.device('cuda:0')
+    #     torch.cuda.set_device(device)
     init_ddp = args['init_ddp']
 
     # -- DATA
@@ -181,13 +181,15 @@ def main(args, resume_preempt=False):
                     init_method="env://")
     world_size = dist.get_world_size()
     rank = dist.get_rank()
+    local_rank = os.environ['LOCAL_RANK']
     if cpu:
         device = torch.device("cpu")  
+        
 
     else:
-        device = torch.device("cuda:"+str(rank))
+        device = torch.device("cuda:"+str(local_rank))
 
-        torch.cuda.set_device("cuda:"+str(rank))
+        torch.cuda.set_device("cuda:"+str(local_rank))
     logger.info(f'Initialized (rank/world-size) {rank}/{world_size}')
     if rank > 0:
         logger.setLevel(logging.ERROR)

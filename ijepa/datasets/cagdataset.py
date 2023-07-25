@@ -71,7 +71,7 @@ class CAGDataset(torch.utils.data.Dataset):
             database=config['database'],
             user=config['username'],
             password=config['password'])
-        sql = config['query'].replace(
+        sql = config['query_pretraining'].replace(
             "?table_name", "\"" + config['table_name'] + "\"")
         sql = sql.replace(
             "?schema_name", "\"" + config['schema_name'] + "\"")

@@ -8,11 +8,11 @@
 from logging import getLogger
 
 from PIL import ImageFilter
-
+from dictionary import LoadImaged
 import torch
 import torchvision.transforms as transforms
 from monai.transforms import (
-    LoadImaged,
+    #LoadImaged,
     EnsureChannelFirstD,
     Compose,
     ScaleIntensityd,
@@ -26,10 +26,23 @@ from monai.transforms import (
     RandSpatialCropd,
     RandTorchVisiond,
     SqueezeDimd,
-    NormalizeIntensityd)
+    NormalizeIntensityd,
+    AddChanneld,
+    Resized)
+import random
+from highdicom.io import ImageFileReader
+from monai.transforms import LoadImage
+
 _GLOBAL_SEED = 0
 logger = getLogger()
 
+def load_random_frame(filename_or_obj):
+    with ImageFileReader(filename_or_obj) as image:
+        frame_idx = random.randint(0, image.number_of_frames - 1)
+        frame = image.read_frame(frame_idx)
+    return frame
+
+    
 def make_cag_transforms(
     crop_size=224,
     crop_scale=(0.3, 1.0),
@@ -54,22 +67,38 @@ def make_cag_transforms(
         return color_distort
 
     # cag aspecific
-    transform_list = [LoadImaged(keys=keys),
-                EnsureChannelFirstD(keys=keys),
-                SpatialPadd(
+    # from monai.transforms import LoadImaged
+    # transform_list = [LoadImaged(keys=keys),
+    #             EnsureChannelFirstD(keys=keys),
+    #             Resized(
+    #                     keys=keys,
+    #                     spatial_size=(
+    #                         crop_size,
+    #                         crop_size,
+    #                         -1)),
+    #             SpatialPadd(
+    #                 keys=keys,
+    #                 spatial_size=[crop_size,
+    #                             crop_size,
+    #                             -1]),
+    #             RandSpatialCropd(keys=keys,
+    #                 roi_size=[
+    #                     -1,
+    #                     -1,
+    #                     1],
+    #                 random_size=False),
+    #             RepeatChanneld(keys=keys, repeats=3),
+    #             SqueezeDimd(keys=keys, dim=3, update_meta=False),
+    #             ]
+    transform_list = [
+            LoadImaged(keys=keys, reader="HighdicomReader", image_only=True),
+            AddChanneld(keys=keys),
+            SpatialPadd(
                     keys=keys,
                     spatial_size=[crop_size,
-                                crop_size,
-                                -1]),
-                RandSpatialCropd(keys=keys,
-                    roi_size=[
-                        -1,
-                        -1,
-                        1],
-                    random_size=False),
-                RepeatChanneld(keys=keys, repeats=3),
-                SqueezeDimd(keys=keys, dim=3),
-                ]
+                                crop_size,]),
+            RepeatChanneld(keys=keys, repeats=3),
+        ]
     transform_list += [
         RandTorchVisiond(
         keys=keys[0],

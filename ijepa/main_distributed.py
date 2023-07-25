@@ -105,6 +105,9 @@ def launch_in_pipeline(config, num_workers, cpu, init_ddp):
     fb_trainer.__call_pipeline__(config)
     
 if __name__ == '__main__':
+    import time
+    start = time.time()
     args = parser.parse_args()
     launch()
+    print(f"Time taken: {time.time() - start}")
 
