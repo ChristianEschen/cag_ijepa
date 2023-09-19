@@ -25,8 +25,8 @@ import numpy as np
 import monai
 from monai.config import DtypeLike, KeysCollection
 from monai.data import image_writer
-from image_reader import ImageReader
-from array_obj import LoadImage, SaveImage
+from ijepa.image_reader import ImageReader
+from ijepa.array_obj import LoadImage, SaveImage
 from monai.transforms.transform import MapTransform, Transform
 from monai.utils import GridSamplePadMode, ensure_tuple, ensure_tuple_rep
 from monai.utils.enums import PostFix

@@ -54,6 +54,7 @@ else:
 
 __all__ = ["ImageReader", "ITKReader", "NibabelReader", "NumpyReader", "PILReader", "PydicomReader", "NrrdReader", "HighdicomReader"]
 
+import SimpleITK as sitk
 def is_no_channel(val) -> bool:
     """Returns whether `val` indicates "no_channel", for MetaKeys.ORIGINAL_CHANNEL_DIM."""
     if isinstance(val, torch.Tensor):
@@ -223,6 +224,27 @@ class HighdicomReader(ImageReader):
             frame = image.read_frame(frame_idx)
         return frame
 
+    def load_random_frame_itk(self, dicom_path):
+        # Create a series reader and get the image size
+        reader = sitk.ImageFileReader()
+        reader.SetFileName(dicom_path)
+        reader.ReadImageInformation()
+        image_size = reader.GetSize()
+        frame_number = random.randint(0, image_size[2])
+
+        # now read the image frame
+        reader = sitk.ImageFileReader()
+        reader.SetFileName(dicom_path)
+        
+        reader.SetExtractIndex((0, 0, frame_number))
+        reader.SetExtractSize((image_size[0], image_size[1], 1))
+        reader.SetImageIO("GDCMImageIO")
+        image = reader.Execute()
+        array = sitk.GetArrayFromImage(image)
+        array = np.squeeze(array)
+        #print('array shape', array.shape)
+
+        return array
     def read(self, data: Sequence[PathLike] | PathLike, **kwargs):
         """
         Read image data from specified file or files, it can read a list of images

@@ -8,11 +8,11 @@
 from logging import getLogger
 
 from PIL import ImageFilter
-from dictionary import LoadImaged
+from ijepa.dictionary import LoadImaged
 import torch
 import torchvision.transforms as transforms
 from monai.transforms import (
-    #LoadImaged,
+   # LoadImaged,
     EnsureChannelFirstD,
     Compose,
     ScaleIntensityd,

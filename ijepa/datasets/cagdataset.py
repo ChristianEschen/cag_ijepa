@@ -18,6 +18,7 @@ import torch
 import torchvision
 import pandas as pd
 import os
+import torch.distributed as dist
 
 _GLOBAL_SEED = 0
 logger = getLogger()
@@ -38,9 +39,10 @@ def make_cagdataset(
     copy_data=False,
     drop_last=True,
     subset_file=None,
-    args=None
+    args=None,
+    phase='train'
 ):
-    dataset= CAGDataset(args, transform)
+    dataset= CAGDataset(args, transform, phase)
     dist_sampler = torch.utils.data.distributed.DistributedSampler(
         dataset=dataset,
         num_replicas=world_size,
@@ -59,9 +61,10 @@ def make_cagdataset(
     return dataset, data_loader, dist_sampler
 
 class CAGDataset(torch.utils.data.Dataset):
-    def __init__(self, config, transforms):
+    def __init__(self, config, transforms, phase='train'):
         self.config = config
         self.transforms = transforms
+        self.phase = phase
         self._construct_loader()
         # contrusct specific cag transforms
                 
@@ -71,8 +74,17 @@ class CAGDataset(torch.utils.data.Dataset):
             database=config['database'],
             user=config['username'],
             password=config['password'])
-        sql = config['query_pretraining'].replace(
-            "?table_name", "\"" + config['table_name'] + "\"")
+        if self.phase == 'train':
+            sql = config['query_pretraining'].replace(
+                "?table_name", "\"" + config['table_name'] + "\"")
+        elif self.phase == 'train_eval':
+            sql = config['query_pretraining_eval_train'].replace(
+                "?table_name", "\"" + config['table_name'] + "\"")
+        elif self.phase == 'val_eval':
+            sql = config['query_pretraining_eval_val'].replace(
+                "?table_name", "\"" + config['table_name'] + "\"")
+        else:
+            raise ValueError('phase not supported')
         sql = sql.replace(
             "?schema_name", "\"" + config['schema_name'] + "\"")
         sql = sql.replace(
@@ -81,6 +93,8 @@ class CAGDataset(torch.utils.data.Dataset):
         if len(df) == 0:
             print('The requested query does not have any data!')
         connection.close()
+        # replicate dataframe df 100 times
+      #  df = pd.concat([df]*4, ignore_index=True)
         return df
 
     def set_data_path(self, features):
@@ -105,17 +119,25 @@ class CAGDataset(torch.utils.data.Dataset):
         self.df = self.getDataFromDatabase(self.config)
         self.features = self.get_input_features(self.df)
         self.set_data_path(self.features)
-        self.data = self.df[self.features + ['rowid']]
+        self.data = self.df[self.features + ['rowid', "labels_transformed"]]
         self.data = self.data.to_dict('records')
-
+        self.data_part = monai.data.partition_dataset(
+                data=self.data,
+                num_partitions=dist.get_world_size(),
+                shuffle=True,
+                even_divisible=True,)[dist.get_rank()]
         print('Constructing cag dataset')
         
     def __len__(self):
-        return len(self.data)
+        return len(self.data_part)
     
     def __getitem__(self, index):
-        sample = self.data[index]
+   #     try:
+        sample = self.data_part[index]
         sample = self.transforms(sample)
         frames = sample[self.features[0]]
-        return frames, 1
-    
+        return frames, (index, sample['labels_transformed'])
+        # except:
+        #     print('Error in loading data')
+        #     return None, 0
+        

@@ -29,8 +29,8 @@ import torch
 
 from monai.config import DtypeLike, NdarrayOrTensor, PathLike
 from monai.data import image_writer
-from folder_layout import FolderLayout, FolderLayoutBase, default_name_formatter
-from image_reader import (
+from ijepa.folder_layout import FolderLayout, FolderLayoutBase, default_name_formatter
+from ijepa.image_reader import (
     ImageReader,
     NibabelReader,
     NrrdReader,
@@ -310,7 +310,7 @@ class LoadImage(Transform):
 
         for _r in ensure_tuple(reader):
             if isinstance(_r, str):
-                module = importlib.import_module("image_reader")
+                module = importlib.import_module("ijepa.image_reader")
 
                 the_reader = getattr(module, _r)
                 has_built_in = True
@@ -400,7 +400,17 @@ class LoadImage(Transform):
         if self.image_only:
            # img_array, meta_data = reader.get_data(img)
             img = convert_to_tensor(img)
-            img = MetaTensor(img)
+            try:
+                img = convert_to_tensor(img)
+                img = MetaTensor(img)
+              #  print('img shape', img.shape)
+            except:
+                img = convert_to_tensor(img)
+
+                img = MetaTensor(img.pixel_array)
+                #print('img shape', img.shape)
+
+               # print('fixed?')
             #img = torch.as_tensor(img)
             return img
         else:

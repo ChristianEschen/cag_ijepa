@@ -22,7 +22,7 @@ import copy
 import logging
 import sys
 import yaml
-
+import time
 import numpy as np
 
 import torch
@@ -49,6 +49,11 @@ from ijepa.helper import (
     init_model,
     init_opt)
 from ijepa.transforms import make_transforms, make_cag_transforms
+from torch.utils.tensorboard import SummaryWriter
+from ijepa.eval.knn import eval_knn_with_model
+from ijepa.metrics import AccuracyAveraging
+from ijepa.metrics import calc_rankme
+
 
 # --
 log_timings = True
@@ -64,9 +69,19 @@ torch.backends.cudnn.benchmark = True
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger()
 
+def get_keys_with_suffix(d, suffix):
+    return [value for key, value in d.items() if key.endswith(suffix)][0]
+
+def get_autocast_dtype(dtype_str):
+    if dtype_str == "fp16":
+        return torch.half
+    elif dtype_str == "bf16":
+        return torch.bfloat16
+    else:
+        return torch.float
 def getdataset(transform, batch_size, mask_collator, pin_mem, num_workers, world_size, rank, root_path, image_folder, copy_data, args):
     if args['data']['dataset'] == 'cag':
-        _, unsupervised_loader, unsupervised_sampler = make_cagdataset(
+        _, unsupervised_loader_train, unsupervised_sampler_train = make_cagdataset(
             transform=transform,
             batch_size=batch_size,
             collator=mask_collator,
@@ -79,9 +94,11 @@ def getdataset(transform, batch_size, mask_collator, pin_mem, num_workers, world
             image_folder=image_folder,
             copy_data=copy_data,
             drop_last=True,
-            args=args)
+            args=args,
+            phase='train')
 
     else:
+        ValueError('dataset not supported')
         _, unsupervised_loader, unsupervised_sampler = make_imagenet1k(
             transform=transform,
             batch_size=batch_size,
@@ -95,7 +112,7 @@ def getdataset(transform, batch_size, mask_collator, pin_mem, num_workers, world
             image_folder=image_folder,
             copy_data=copy_data,
             drop_last=True)
-    return _, unsupervised_loader, unsupervised_sampler
+    return _, unsupervised_loader_train, unsupervised_sampler_train
 
 def main(args, resume_preempt=False):
 
@@ -106,6 +123,8 @@ def main(args, resume_preempt=False):
     # -- META
     model_name = args['meta']['model_name']
     load_model = args['meta']['load_checkpoint'] or resume_preempt
+    load_pretrained_checkpoint =  args['meta']['load_pretrained_checkpoint'] # boolean
+    load_pretrained_model_path = args['meta']['load_pretrained_checkpoint_path']
     r_file = args['meta']['read_checkpoint']
     copy_data = args['meta']['copy_data']
     pred_depth = args['meta']['pred_depth']
@@ -162,7 +181,7 @@ def main(args, resume_preempt=False):
     # -- LOGGING
     folder = args['logging']['folder']
     tag = args['logging']['write_tag']
-    
+
 
     dump = os.path.join(folder, 'params-ijepa.yaml')
     with open(dump, 'w') as f:
@@ -181,6 +200,14 @@ def main(args, resume_preempt=False):
                     init_method="env://")
     world_size = dist.get_world_size()
     rank = dist.get_rank()
+    # generate timestamp for folder
+    timestamp = time.strftime("%Y_%m_%d_%H_%M_%S")
+    tensorboard_folder = os.path.join(folder, 'tb_' + timestamp)
+
+    if rank == 0:
+        # create tensorboard folder if not exists
+        if not os.path.exists(tensorboard_folder):
+            os.makedirs(tensorboard_folder)
     local_rank = os.environ['LOCAL_RANK']
     if cpu:
         device = torch.device("cpu")  
@@ -196,7 +223,7 @@ def main(args, resume_preempt=False):
 
     # -- log/checkpointing paths
     log_file = os.path.join(folder, f'{tag}_r{rank}.csv')
-    save_path = os.path.join(folder, f'{tag}' + '-ep{epoch}.pth.tar')
+    save_path = os.path.join(folder, f'{tag}' + '-ep{epoch}_model.pt')
     latest_path = os.path.join(folder, 'model.pt')
     load_path = None
     if load_model:
@@ -252,11 +279,11 @@ def main(args, resume_preempt=False):
             color_jitter=color_jitter)
 
     # -- init data-loaders/samplers
-    _, unsupervised_loader, unsupervised_sampler = getdataset(
+    _, unsupervised_loader_train, unsupervised_sampler_train = getdataset(
         transform, batch_size, mask_collator,
         pin_mem, num_workers, world_size,
         rank, root_path, image_folder, copy_data, args)
-    ipe = len(unsupervised_loader)
+    ipe = len(unsupervised_loader_train)
 
     # -- init optimizer and scheduler
     optimizer, scaler, scheduler, wd_scheduler = init_opt(
@@ -287,22 +314,80 @@ def main(args, resume_preempt=False):
                           for i in range(int(ipe*num_epochs*ipe_scale)+1))
 
     start_epoch = 0
-    # -- load training checkpoint
-    if load_model:
-        encoder, predictor, target_encoder, optimizer, scaler, start_epoch = load_checkpoint(
-            device=device,
-            r_path=load_path,
-            encoder=encoder,
-            predictor=predictor,
-            target_encoder=target_encoder,
-            opt=optimizer,
-            scaler=scaler)
-        for _ in range(start_epoch*ipe):
-            scheduler.step()
-            wd_scheduler.step()
-            next(momentum_scheduler)
-            mask_collator.step()
+    # always load from pretrained imagenet:
+    if rank == 0:
+        if load_pretrained_checkpoint:
+            encoder, predictor, target_encoder, optimizer, scaler, start_epoch = load_checkpoint(
+                    device=device,
+                    r_path=load_pretrained_model_path,
+                    encoder=encoder,
+                    predictor=predictor,
+                    target_encoder=target_encoder,
+                    opt=optimizer,
+                    scaler=scaler)
+            for _ in range(start_epoch*ipe):
+                scheduler.step()
+                wd_scheduler.step()
+                next(momentum_scheduler)
+                mask_collator.step()
 
+    # -- load training checkpoint
+    # if rank == 0:
+    #     if load_model:
+    #         encoder, predictor, target_encoder, optimizer, scaler, start_epoch = load_checkpoint(
+    #             device=device,
+    #             r_path=load_path,
+    #             encoder=encoder,
+    #             predictor=predictor,
+    #             target_encoder=target_encoder,
+    #             opt=optimizer,
+    #             scaler=scaler)
+    #         for _ in range(start_epoch*ipe):
+    #             scheduler.step()
+    #             wd_scheduler.step()
+    #             next(momentum_scheduler)
+    #             mask_collator.step()
+    if load_model:
+        for param in encoder.parameters():
+            dist.broadcast(param.data, src=0)  # src=0 means we're broadcasting from rank 0
+
+        for param in predictor.parameters():
+            dist.broadcast(param.data, src=0)
+
+    # if target_encoder is not None:
+        for param in target_encoder.parameters():
+            dist.broadcast(param.data, src=0)
+        # epoch_tensor = torch.tensor(start_epoch, dtype=torch.int).to(device)
+        # dist.broadcast(epoch_tensor, src=0)
+        # start_epoch = epoch_tensor.item()
+        
+        # if scaler is not None:
+        #     # The state_dict of the scaler has '_scale', '_growth_tracker', and possibly other keys.
+        #     # You'll want to broadcast each tensor in the state.
+
+        #     state_dict = scaler.state_dict()
+
+        #     # Broadcast the '_scale' tensor
+        #     dist.broadcast(state_dict["_scale"], src=0)
+
+        #     # Broadcast the '_growth_tracker' tensor
+        #     dist.broadcast(state_dict["_growth_tracker"], src=0)
+        
+        
+        # for group in optimizer.param_groups:
+        #     for p in group['params']:
+        #         if p.requires_grad:
+        #             state = optimizer.state[p]
+        #             # For AdamW, you have 'step', 'exp_avg', and 'exp_avg_sq' 
+        #             # as the primary state components.
+        #             dist.broadcast(state['step'], src=0)
+        #             dist.broadcast(state['exp_avg'], src=0)
+        #             dist.broadcast(state['exp_avg_sq'], src=0)
+        #             # For the AdamW variant, you might also have 'max_exp_avg_sq'.
+        #             if 'max_exp_avg_sq' in state:
+        #                 dist.broadcast(state['max_exp_avg_sq'], src=0)
+                    
+                
     def save_checkpoint(epoch):
         save_dict = {
             'encoder': encoder.state_dict(),
@@ -321,23 +406,60 @@ def main(args, resume_preempt=False):
             if (epoch + 1) % checkpoint_freq == 0:
                 torch.save(save_dict, save_path.format(epoch=f'{epoch + 1}'))
 
+    # tensorboard logger:
+    if rank == 0:
+        writer = SummaryWriter(log_dir=tensorboard_folder)
+
     # -- TRAINING LOOP
+            # start timer
+    start = time.time()
     for epoch in range(start_epoch, num_epochs):
         logger.info('Epoch %d' % (epoch + 1))
 
         # -- update distributed-data-loader epoch
-        unsupervised_sampler.set_epoch(epoch)
+        unsupervised_sampler_train.set_epoch(epoch)
 
         loss_meter = AverageMeter()
         maskA_meter = AverageMeter()
         maskB_meter = AverageMeter()
         time_meter = AverageMeter()
 
-        for itr, (udata, masks_enc, masks_pred) in enumerate(unsupervised_loader):
+        # validation
+        #if epoch % 20 == 0:
+       # with torch.inference_mode():
+        with torch.no_grad():
+            results_dict =eval_knn_with_model(
+                args=args,
+                model=target_encoder,
+                output_dir=folder,
+                nb_knn=(10,), #(10, 20, 100, 200)
+                temperature=0.07,
+                autocast_dtype=get_autocast_dtype("bf16") if cpu is False else torch.float,
+                accuracy_averaging=AccuracyAveraging.MEAN_ACCURACY,
+                transform=transform,
+                gather_on_cpu=True,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                n_per_class_list=[-1],
+                n_tries=1,
+                n_classes=2
+            )
+        if rank == 0:
+            f1_score = get_keys_with_suffix(results_dict, "_F1-score")
+            accuracy = get_keys_with_suffix(results_dict, "_Top 1")
+            rankme = get_keys_with_suffix(results_dict, "rankme")
+            writer.add_scalar('Validation Accuracy', accuracy, global_step=epoch)
+            writer.add_scalar('Train rankme', rankme, global_step=epoch)
+            writer.add_scalar('Validation F1_score_macro', f1_score, global_step=epoch)
+                
+
+        # training
+        for itr, (udata, masks_enc, masks_pred) in enumerate(unsupervised_loader_train):
 
             def load_imgs():
                 # -- unsupervised imgs
                 imgs = udata[0].to(device, non_blocking=True)
+                labels = udata[1][1].to(device, non_blocking=True)
                 masks_1 = [u.to(device, non_blocking=True) for u in masks_enc]
                 masks_2 = [u.to(device, non_blocking=True) for u in masks_pred]
                 return (imgs, masks_1, masks_2)
@@ -353,6 +475,14 @@ def main(args, resume_preempt=False):
                 def forward_target():
                     with torch.no_grad():
                         h = target_encoder(imgs)
+                        # Compute rankme
+                        # rankme = calc_rankme(h)
+                        # torch.distributed.reduce(rankme, dst=0, op=torch.distributed.ReduceOp.SUM)
+                        # if rank == 0:
+                        #     rankme = rankme / dist.get_world_size()
+                        #     writer.add_scalar('Rankme', rankme,
+                        #                     global_step=epoch * len(unsupervised_loader_train) + itr)
+                                
                         h = F.layer_norm(h, (h.size(-1),))  # normalize over feature-dim
                         B = len(h)
                         # -- create targets (masked regions of h)
@@ -380,6 +510,14 @@ def main(args, resume_preempt=False):
                         h = forward_target()
                         z = forward_context()
                         loss = loss_fn(z, h)
+                # copy loss value to new variable
+                loss_value = loss
+                torch.distributed.reduce(loss_value, dst=0, op=torch.distributed.ReduceOp.SUM)
+                # only write if rank == 0
+                if rank == 0:
+                    loss_value = loss_value / dist.get_world_size()
+                    writer.add_scalar('Training loss', loss_value, global_step=epoch * len(unsupervised_loader_train) + itr)
+
                 #  Step 2. Backward & step
                 if use_bfloat16:
                     scaler.scale(loss).backward()
@@ -397,10 +535,18 @@ def main(args, resume_preempt=False):
                     for param_q, param_k in zip(encoder.parameters(), target_encoder.parameters()):
                         param_k.data.mul_(m).add_((1.-m) * param_q.detach().data)
 
+                # only logg every 10 epoch
+              #  if epoch % 20 == 0:
+                    
+                    
+
+
                 return (float(loss), _new_lr, _new_wd, grad_stats)
             (loss, _new_lr, _new_wd, grad_stats), etime = gpu_timer(train_step)
             loss_meter.update(loss)
             time_meter.update(etime)
+            
+            
 
             # -- Logging
             def log_stats():
@@ -435,6 +581,9 @@ def main(args, resume_preempt=False):
         # -- Save Checkpoint after every epoch
         logger.info('avg. loss %.3f' % loss_meter.avg)
         save_checkpoint(epoch+1)
+    if rank == 0:
+        writer.close()
+    print('stopping time is', time.time() - start)
 
 
 if __name__ == "__main__":
